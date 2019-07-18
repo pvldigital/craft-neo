@@ -5,6 +5,7 @@ use yii\base\Component;
 
 use Craft;
 use craft\base\ElementInterface;
+use craft\elements\db\ElementQueryInterface;
 use craft\db\Query;
 use craft\models\Structure;
 use craft\helpers\StringHelper;
@@ -22,7 +23,7 @@ use benf\neo\records\BlockStructure as BlockStructureRecord;
  * @author Benjamin Fleming
  * @since 2.0.0
  */
-class Blocks extends Component
+class Blocks extends Component implements BlockElementInterface
 {
 	/**
 	 * Returns a Neo block given its ID.
