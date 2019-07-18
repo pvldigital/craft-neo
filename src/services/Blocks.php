@@ -5,7 +5,6 @@ use yii\base\Component;
 
 use Craft;
 use craft\base\ElementInterface;
-use craft\elements\db\ElementQueryInterface;
 use craft\db\Query;
 use craft\models\Structure;
 use craft\helpers\StringHelper;
@@ -23,7 +22,7 @@ use benf\neo\records\BlockStructure as BlockStructureRecord;
  * @author Benjamin Fleming
  * @since 2.0.0
  */
-class Blocks extends Component implements BlockElementInterface
+class Blocks extends Component
 {
 	/**
 	 * Returns a Neo block given its ID.
@@ -181,11 +180,6 @@ class Blocks extends Component implements BlockElementInterface
 				'ownerId' => $ownerId,
 			]);
 
-		if ($ownerSiteId)
-		{
-			$query->andWhere(['ownerSiteId' => $ownerSiteId]);
-		}
-
 		$result = $query->one();
 
 		if ($result)
@@ -247,7 +241,6 @@ class Blocks extends Component implements BlockElementInterface
 
 			$record->structureId = $blockStructure->structureId;
 			$record->ownerId = $blockStructure->ownerId;
-			$record->ownerSiteId = $blockStructure->ownerSiteId;
 			$record->fieldId = $blockStructure->fieldId;
 
 			$record->save(false);
