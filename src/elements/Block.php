@@ -7,6 +7,7 @@ use yii\base\InvalidConfigException;
 use Craft;
 use craft\base\Element;
 use craft\base\ElementInterface;
+use craft\base\BlockElementInterface;
 use craft\elements\db\ElementQueryInterface;
 use craft\helpers\ArrayHelper;
 use craft\helpers\ElementHelper;
@@ -14,6 +15,7 @@ use craft\validators\SiteIdValidator;
 
 use benf\neo\Plugin as Neo;
 use benf\neo\elements\db\BlockQuery;
+use benf\neo\Field as neoField;
 use benf\neo\models\BlockType;
 use benf\neo\records\Block as BlockRecord;
 
@@ -25,7 +27,7 @@ use benf\neo\records\Block as BlockRecord;
  * @author Benjamin Fleming
  * @since 2.0.0
  */
-class Block extends Element
+class Block extends Element implements BlockElementInterface
 {
 	/**
 	 * @inheritdoc
@@ -34,6 +36,14 @@ class Block extends Element
 	{
 		return Craft::t('neo', "Neo Block");
 	}
+
+    /**
+     * @inheritdoc
+     */
+    public static function pluralDisplayName(): string
+    {
+        return Craft::t('neo', 'Neo Blocks');
+    }
 
 	/**
 	 * @inheritdoc
@@ -92,6 +102,15 @@ class Block extends Element
 
 		return $map;
 	}
+	
+	/**
+	 * @inheritdoc
+	 */
+	public static function gqlTypeNameByContext($context): string
+	{
+		/** @var BlockType $context */
+		return $context->getField()->handle . '_' . $context->handle . '_BlockType';
+	}
 
 	/**
 	 * @var int|null The field ID.
@@ -105,6 +124,7 @@ class Block extends Element
 
 	/**
 	 * @var int|null The owner site ID.
+     * @deprecated in 2.4.0. Use [[$siteId]] instead.
 	 */
 	public $ownerSiteId;
 
@@ -153,10 +173,20 @@ class Block extends Element
 	 */
 	private $_useMemoized = false;
 
+    /**
+     * @inheritdoc
+     */
+    public function attributes()
+    {
+        $names = parent::attributes();
+        $names[] = 'owner';
+        return $names;
+    }
+
 	/**
 	 * @inheritdoc
 	 */
-	public function extraFields(): array
+	public function extraFields()
 	{
 		$names = parent::extraFields();
 		$names[] = 'owner';
@@ -168,11 +198,10 @@ class Block extends Element
 	/**
 	 * @inheritdoc
 	 */
-	public function rules(): array
+	public function rules()
 	{
 		$rules = parent::rules();
 		$rules[] = [['fieldId', 'ownerId', 'typeId'], 'number', 'integerOnly' => true];
-		$rules[] = [['ownerSiteId'], SiteIdValidator::class];
 
 		return $rules;
 	}
@@ -182,30 +211,17 @@ class Block extends Element
 	 */
 	public function getSupportedSites(): array
 	{
-		$siteIds = [];
+        try {
+            $owner = $this->getOwner();
+        } catch (InvalidConfigException $e) {
+            $owner = $this->duplicateOf;
+        }
 
-		if ($this->ownerSiteId !== null)
-		{
-			$siteIds[] = $this->ownerSiteId;
-		}
-		else
-		{
-			$owner = $this->getOwner();
+        if (!$owner) {
+            return [Craft::$app->getSites()->getPrimarySite()->id];
+        }
 
-			if ($owner || $this->duplicateOf)
-			{
-				foreach (ElementHelper::supportedSitesForElement($owner ?? $this->duplicateOf) as $siteInfo)
-				{
-					$siteIds[] = $siteInfo['siteId'];
-				}
-			}
-			else
-			{
-				$siteIds[] = Craft::$app->getSites()->getPrimarySite()->id;
-			}
-		}
-
-		return $siteIds;
+        return Neo::$plugin->fields->getSupportedSiteIdsForField($this->_getField(), $owner);
 	}
 
 	/**
@@ -243,25 +259,21 @@ class Block extends Element
 	 * Returns this block's owner, if it has one.
 	 *
 	 * @return ElementInterface|null
+     * @throws
 	 */
-	public function getOwner()
+	public function getOwner(): ElementInterface
 	{
-		$owner = $this->_owner;
+		 if ($this->_owner === null) {
+             if ($this->ownerId === null) {
+                 throw new InvalidConfigException('Neo block is missing its owner ID');
+             }
 
-		if ($owner !== null)
-		{
-			if ($owner === false)
-			{
-				$owner = null;
-			}
-		}
-		elseif ($this->ownerId !== null)
-		{
-			$owner = Craft::$app->getElements()->getElementById($this->ownerId, null, $this->siteId);
-			$this->_owner = $owner ?? false;
-		}
+             if (($this->_owner = Craft::$app->getElements()->getElementById($this->ownerId, null, $this->siteId)) === null) {
+                 throw new InvalidConfigException('Invalid owner ID: ' . $this->ownerId);
+             }
+	  }
 
-		return $owner;
+	  return $this->_owner;
 	}
 
 	/**
@@ -419,15 +431,26 @@ class Block extends Element
 			parent::setEagerLoadedElements($handle, $elements);
 		}
 	}
+	
+	/**
+	 * @inheritdoc
+	 */
+	public function getGqlTypeName(): string
+	{
+		return static::gqlTypeNameByContext($this->getType());
+	}
 
 	/**
 	 * @inheritdoc
 	 */
 	public function getHasFreshContent(): bool
 	{
-		$owner = $this->getOwner();
-
-		return $owner ? $owner->getHasFreshContent() : false;
+        // Defer to the owner element
+        try {
+            return $this->getOwner()->getHasFreshContent();
+        } catch (InvalidConfigException $e) {
+            return false;
+        }
 	}
 
 	/**
@@ -438,26 +461,27 @@ class Block extends Element
 	{
 		$record = null;
 
-		if ($isNew)
-		{
-			$record = new BlockRecord();
-			$record->id = $this->id;
-		}
-		else
-		{
-			$record = BlockRecord::findOne($this->id);
-
-			if (!$record)
+		if (!$this->propagating) {
+			if ($isNew)
 			{
-				throw new Exception("Invalid Neo block ID: $this->id");
+				$record = new BlockRecord();
+				$record->id = (int)$this->id;
 			}
-		}
+			else
+			{
+				$record = BlockRecord::findOne($this->id);
 
-		$record->fieldId = $this->fieldId;
-		$record->ownerId = $this->ownerId;
-		$record->ownerSiteId = $this->ownerSiteId;
-		$record->typeId = $this->typeId;
-		$record->save(false);
+				if (!$record)
+				{
+					throw new Exception("Invalid Neo block ID: $this->id");
+				}
+			}
+
+			$record->fieldId = (int)$this->fieldId;
+			$record->ownerId = (int)$this->ownerId;
+			$record->typeId = (int)$this->typeId;
+			$record->save(false);
+		}
 
 		parent::afterSave($isNew);
 	}
@@ -540,6 +564,31 @@ class Block extends Element
 	}
 
 	/**
+	 * Whether current view is a draft or not
+	 *
+	 * @return bool
+	 */
+	public function isDraftPreview()
+	{
+		// get token
+		$token = Craft::$app->request->getParam('token');
+
+		if(!empty($token)) 
+		{
+			// get the route of the token
+			$route = Craft::$app->tokens->getTokenRoute($token);
+
+			// check it's a shared entry
+			if($route && $route[0] == 'entries/view-shared-entry')
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * @inheritdoc
 	 */
 	public function getAncestors(int $dist = null)
@@ -548,8 +597,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['ancestors']))
 			{
@@ -583,8 +633,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['parent']))
 			{
@@ -611,8 +662,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['descendants']))
 			{
@@ -646,8 +698,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['children']))
 			{
@@ -674,8 +727,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['siblings']))
 			{
@@ -701,8 +755,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['prevSibling']))
 			{
@@ -728,8 +783,9 @@ class Block extends Element
 		$isLivePreview = Craft::$app->getRequest()->getIsLivePreview();
 		$hasLocalElements = isset($this->_allElements);
 		$isUsingMemoized = $this->isUsingMemoized();
+		$isDraftPreview = $this->isDraftPreview();
 
-		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized)
+		if (($isLivePreview && $hasLocalElements) || $isUsingMemoized || $isDraftPreview)
 		{
 			if (!isset($this->_liveQueries['nextSibling']))
 			{
@@ -758,7 +814,7 @@ class Block extends Element
 		$query->ownerId($this->ownerId);
 		$query->siteId($this->siteId);
 		$query->limit(null);
-		$query->anyStatus();
+		$query->status('enabled');
 		$query->indexBy('id');
 
 		return $query;
@@ -776,4 +832,17 @@ class Block extends Element
 
 		return $typeHandlePrefix;
 	}
+
+    // Private Methods
+    // =========================================================================
+    /**
+     * Returns the Matrix field.
+     *
+     * @return neoField
+     */
+    private function _getField(): neoField
+    {
+        /** @noinspection PhpIncompatibleReturnTypeInspection */
+        return Craft::$app->getFields()->getFieldById($this->fieldId);
+    }
 }
